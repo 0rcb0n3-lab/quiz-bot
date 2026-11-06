@@ -220,3 +220,6 @@ __marimo__/
 .DS_Store
 staticfiles/
 media/
+src/
+pyproject.toml
+.python-version
