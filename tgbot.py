@@ -1,9 +1,7 @@
-import os
 import random
 from enum import Enum
 from functools import partial
 
-import redis
 from dotenv import load_dotenv
 from telegram import ReplyKeyboardMarkup
 from telegram.ext import (
@@ -14,7 +12,16 @@ from telegram.ext import (
     Updater,
 )
 
-from quiz_utils import clean_answer, load_questions_from_directory
+from common import (
+    GIVE_UP,
+    NEW_QUESTION,
+    SCORE,
+    create_redis_client,
+    get_env,
+    get_questions_path,
+    load_questions,
+)
+from quiz_utils import clean_answer, normalize_answer
 
 
 class BotStates(Enum):
@@ -23,17 +30,10 @@ class BotStates(Enum):
 
 def get_keyboard():
     keyboard = [
-        ["Новый вопрос", "Сдаться"],
-        ["Мой счёт"],
+        [NEW_QUESTION, GIVE_UP],
+        [SCORE],
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-
-
-def get_env(name):
-    value = os.getenv(name)
-    if not value:
-        raise RuntimeError(f"Не задана переменная окружения {name}")
-    return value
 
 
 def start(update, context):
@@ -66,10 +66,11 @@ def handle_solution_attempt(redis_client, questions_answers, update, context):
         update.message.reply_text("Вопрос не найден. Нажмите «Новый вопрос».")
         return ConversationHandler.END
 
-    user_answer = update.message.text.strip().lower()
+    user_answer = normalize_answer(update.message.text)
     cleaned_correct_answer = clean_answer(correct_answer)
 
     if user_answer and user_answer in cleaned_correct_answer:
+        redis_client.delete(user_key)
         update.message.reply_text(
             "Правильно! Поздравляю! Для следующего вопроса нажмите «Новый вопрос»."
         )
@@ -88,7 +89,10 @@ def handle_give_up(redis_client, questions, questions_answers, update, context):
         return ConversationHandler.END
 
     correct_answer = questions_answers.get(question)
-    update.message.reply_text(f"Правильный ответ: {correct_answer}")
+    if correct_answer:
+        update.message.reply_text(f"Правильный ответ: {correct_answer}")
+    else:
+        update.message.reply_text("Вопрос не найден. Нажмите «Новый вопрос».")
 
     new_question = random.choice(questions)
     redis_client.set(user_key, new_question)
@@ -107,16 +111,12 @@ def main():
 
     tg_token = get_env("TG_BOT_TOKEN")
     redis_url = get_env("REDIS_URL")
-    questions_path = os.getenv("QUESTIONS_PATH", "/opt/quiz-bot/quiz-questions")
+    questions_path = get_questions_path()
 
-    redis_client = redis.from_url(redis_url, decode_responses=True)
+    redis_client = create_redis_client(redis_url)
     redis_client.ping()
 
-    questions_answers = load_questions_from_directory(questions_path)
-    if not questions_answers:
-        raise RuntimeError(f"Не найдены вопросы в {questions_path}")
-
-    questions = list(questions_answers)
+    questions_answers, questions = load_questions(questions_path)
 
     new_question_handler = partial(
         handle_new_question_request,
@@ -138,14 +138,18 @@ def main():
     conv_handler = ConversationHandler(
         entry_points=[
             CommandHandler("start", start),
-            MessageHandler(Filters.regex("^Новый вопрос$"), new_question_handler),
+            MessageHandler(Filters.regex(f"^{NEW_QUESTION}$"), new_question_handler),
         ],
         states={
             BotStates.QUIZ: [
-                MessageHandler(Filters.regex("^Новый вопрос$"), new_question_handler),
-                MessageHandler(Filters.regex("^Сдаться$"), give_up_handler),
-                MessageHandler(Filters.regex("^Мой счёт$"), handle_score),
-                MessageHandler(Filters.text & ~Filters.command, solution_attempt_handler),
+                MessageHandler(
+                    Filters.regex(f"^{NEW_QUESTION}$"), new_question_handler
+                ),
+                MessageHandler(Filters.regex(f"^{GIVE_UP}$"), give_up_handler),
+                MessageHandler(Filters.regex(f"^{SCORE}$"), handle_score),
+                MessageHandler(
+                    Filters.text & ~Filters.command, solution_attempt_handler
+                ),
             ],
         },
         fallbacks=[

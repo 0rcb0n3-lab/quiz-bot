@@ -1,29 +1,30 @@
-import os
 import random
 from functools import partial
 
-import redis
 import vk_api
 from dotenv import load_dotenv
 from vk_api.keyboard import VkKeyboard, VkKeyboardColor
 from vk_api.longpoll import VkEventType, VkLongPoll
 
-from quiz_utils import clean_answer, load_questions_from_directory
-
-
-def get_env(name):
-    value = os.getenv(name)
-    if not value:
-        raise RuntimeError(f"Не задана переменная окружения {name}")
-    return value
+from common import (
+    GIVE_UP,
+    NEW_QUESTION,
+    SCORE,
+    create_redis_client,
+    get_env,
+    get_optional_env,
+    get_questions_path,
+    load_questions,
+)
+from quiz_utils import clean_answer, normalize_answer
 
 
 def get_keyboard():
     keyboard = VkKeyboard(one_time=False)
-    keyboard.add_button("Новый вопрос", color=VkKeyboardColor.PRIMARY)
-    keyboard.add_button("Сдаться", color=VkKeyboardColor.NEGATIVE)
+    keyboard.add_button(NEW_QUESTION, color=VkKeyboardColor.PRIMARY)
+    keyboard.add_button(GIVE_UP, color=VkKeyboardColor.NEGATIVE)
     keyboard.add_line()
-    keyboard.add_button("Мой счёт", color=VkKeyboardColor.SECONDARY)
+    keyboard.add_button(SCORE, color=VkKeyboardColor.SECONDARY)
     return keyboard.get_keyboard()
 
 
@@ -53,7 +54,10 @@ def handle_give_up(vk, redis_client, questions, questions_answers, user_id):
         return
 
     correct_answer = questions_answers.get(question)
-    send_message(vk, user_id, f"Правильный ответ: {correct_answer}")
+    if correct_answer:
+        send_message(vk, user_id, f"Правильный ответ: {correct_answer}")
+    else:
+        send_message(vk, user_id, "Вопрос не найден. Нажмите «Новый вопрос».")
 
     new_question = random.choice(questions)
     redis_client.set(user_key, new_question)
@@ -78,9 +82,10 @@ def handle_solution_attempt(vk, redis_client, questions_answers, user_id, user_m
         return
 
     cleaned_correct_answer = clean_answer(correct_answer)
-    user_answer = user_message.strip().lower()
+    user_answer = normalize_answer(user_message)
 
     if user_answer and user_answer in cleaned_correct_answer:
+        redis_client.delete(user_key)
         send_message(
             vk,
             user_id,
@@ -96,17 +101,13 @@ def main():
 
     vk_token = get_env("VK_BOT_TOKEN")
     redis_url = get_env("REDIS_URL")
-    questions_path = os.getenv("QUESTIONS_PATH", "/opt/quiz-bot/quiz-questions")
-    group_id = os.getenv("VK_GROUP_ID")
+    questions_path = get_questions_path()
+    group_id = get_optional_env("VK_GROUP_ID")
 
-    redis_client = redis.from_url(redis_url, decode_responses=True)
+    redis_client = create_redis_client(redis_url)
     redis_client.ping()
 
-    questions_answers = load_questions_from_directory(questions_path)
-    if not questions_answers:
-        raise RuntimeError(f"Не найдены вопросы в {questions_path}")
-
-    questions = list(questions_answers)
+    questions_answers, questions = load_questions(questions_path)
 
     vk_session = vk_api.VkApi(token=vk_token)
     vk = vk_session.get_api()
@@ -141,17 +142,19 @@ def main():
             continue
 
         user_id = event.user_id
-        user_message = event.text
+        user_message = (event.text or "").strip()
+        if not user_message:
+            continue
 
-        if user_message == "Новый вопрос":
+        if user_message == NEW_QUESTION:
             new_question_handler(user_id)
             continue
 
-        if user_message == "Сдаться":
+        if user_message == GIVE_UP:
             give_up_handler(user_id)
             continue
 
-        if user_message == "Мой счёт":
+        if user_message == SCORE:
             score_handler(user_id)
             continue
 
