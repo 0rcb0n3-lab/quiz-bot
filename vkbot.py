@@ -1,3 +1,4 @@
+import os
 import random
 from functools import partial
 
@@ -7,16 +8,17 @@ from vk_api.keyboard import VkKeyboard, VkKeyboardColor
 from vk_api.longpoll import VkEventType, VkLongPoll
 
 from common import (
+    DEFAULT_QUESTIONS_PATH,
     GIVE_UP,
     NEW_QUESTION,
     SCORE,
     create_redis_client,
-    get_env,
-    get_optional_env,
-    get_questions_path,
-    load_questions,
 )
-from quiz_utils import clean_answer, normalize_answer
+from quiz_utils import (
+    clean_answer,
+    load_questions_from_directory,
+    normalize_answer,
+)
 
 
 def get_keyboard():
@@ -99,15 +101,18 @@ def handle_solution_attempt(vk, redis_client, questions_answers, user_id, user_m
 def main():
     load_dotenv()
 
-    vk_token = get_env("VK_BOT_TOKEN")
-    redis_url = get_env("REDIS_URL")
-    questions_path = get_questions_path()
-    group_id = get_optional_env("VK_GROUP_ID")
+    vk_token = os.environ["VK_BOT_TOKEN"]
+    redis_url = os.environ["REDIS_URL"]
+    questions_path = os.getenv("QUESTIONS_PATH", DEFAULT_QUESTIONS_PATH)
+    group_id = os.getenv("VK_GROUP_ID")
 
     redis_client = create_redis_client(redis_url)
     redis_client.ping()
 
-    questions_answers, questions = load_questions(questions_path)
+    questions_answers = load_questions_from_directory(questions_path)
+    if not questions_answers:
+        raise RuntimeError(f"Не найдены вопросы в {questions_path}")
+    questions = list(questions_answers)
 
     vk_session = vk_api.VkApi(token=vk_token)
     vk = vk_session.get_api()

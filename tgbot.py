@@ -1,3 +1,4 @@
+import os
 import random
 from enum import Enum
 from functools import partial
@@ -13,15 +14,17 @@ from telegram.ext import (
 )
 
 from common import (
+    DEFAULT_QUESTIONS_PATH,
     GIVE_UP,
     NEW_QUESTION,
     SCORE,
     create_redis_client,
-    get_env,
-    get_questions_path,
-    load_questions,
 )
-from quiz_utils import clean_answer, normalize_answer
+from quiz_utils import (
+    clean_answer,
+    load_questions_from_directory,
+    normalize_answer,
+)
 
 
 class BotStates(Enum):
@@ -109,14 +112,17 @@ def handle_score(update, context):
 def main():
     load_dotenv()
 
-    tg_token = get_env("TG_BOT_TOKEN")
-    redis_url = get_env("REDIS_URL")
-    questions_path = get_questions_path()
+    tg_token = os.environ["TG_BOT_TOKEN"]
+    redis_url = os.environ["REDIS_URL"]
+    questions_path = os.getenv("QUESTIONS_PATH", DEFAULT_QUESTIONS_PATH)
 
     redis_client = create_redis_client(redis_url)
     redis_client.ping()
 
-    questions_answers, questions = load_questions(questions_path)
+    questions_answers = load_questions_from_directory(questions_path)
+    if not questions_answers:
+        raise RuntimeError(f"Не найдены вопросы в {questions_path}")
+    questions = list(questions_answers)
 
     new_question_handler = partial(
         handle_new_question_request,
